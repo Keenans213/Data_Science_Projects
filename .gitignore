@@ -1,1 +1,11 @@
 .DS_Store
+.ipynb_checkpoints
+Not_Github
+
+# NRL
+NRL/pcaF.pkl
+NRL/venvNRL
+NRL/NRL_Predictions.ipynb
+NRL/.DS_Store
+NRL/ipynb_checkpoints
+NRL/PyTorch_Function_Examples.ipynb
