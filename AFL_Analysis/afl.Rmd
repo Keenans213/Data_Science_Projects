@@ -1,0 +1,402 @@
+---
+title: "AFL Analysis"
+output: 
+  html_document:
+    code_folding: hide
+editor_options: 
+  chunk_output_type: inline
+runtime: shiny
+---
+
+# Introduction
+
+To keep up with the latest fixtures, results, rounds and player statistics I have made this R Notebook to do just that. Here, I have downloaded, scraped, ingested, cleaned, and analysed various pieces of AFL data. The following provides a summary of the data I have gathered, along with the following links:
+
+-   2021 Fixtures (<https://fixturedownload.com/sport/aussie-rules>)
+
+-   2021 Ladder (<https://afltables.com/afl/seas/2021.html> - scroll to bottom)
+
+-   2021 Player Statistics (<https://afltables.com/afl/stats/2021a.html>)
+
+-   Historical Results (<https://www.aussportsbetting.com/data/historical-afl-results-and-odds-data/>)
+
+Please note that it may take a day or two after the completion of the round for the player statistics and ladder to update.
+
+# Setup
+
+```{r Load Packages, message=FALSE}
+# Load Packages
+library(rvest)
+library(reshape) # must use before tidyverse due to conflict with `rename()` in dplyr
+library(tidyverse)
+library(janitor)
+library(glue)
+library(readxl)
+library(writexl)
+library(lubridate)
+library(plotly)
+library(shiny)
+library(DT)
+```
+
+```{r Setup}
+# Defining paths and setting working directory
+home_path <- "/Users/jakekeenan/Data_Science_Projects/Not_Github/RStudio/AFL_Analysis"
+fixtures_name <- "team_fixtures.xlsx"
+fixtures_dir <- "Fixtures_xlsx"
+setwd(home_path)
+```
+
+<!-- ### Helper Functions -->
+
+```{r Missing Value Checker}
+# Helper function to determine if any missing values
+mv_checker <- function(df) {
+  df %>% 
+    map_df(~sum(is.na(.))) %>% 
+    mutate(placeholder = 0) %>%
+    pivot_longer(!placeholder, names_to="Column Names", values_to="Missing Values") %>% 
+    select(-placeholder) %>% 
+    arrange(desc(`Missing Values`)) %>% 
+    mutate(`% of Total` = glue("{round(`Missing Values`/nrow(df) * 100, 2)}%"))
+}
+```
+
+<!-- # Tibbles -->
+
+<!-- ### Team Fixtures -->
+
+```{r Download Team Fixtures and Combining}
+# Downloading/Tidying the Fixtures data
+afl_teams <- c("adelaide-crows", "brisbane-lions", "carlton", "collingwood", "essendon",
+               "fremantle", "geelong-cats", "gold-coast-suns", "gws-giants", "hawthorn",
+               "melbourne", "north-melbourne", "port-adelaide", "richmond", "st-kilda",
+               "sydney-swans", "west-coast-eagles", "western-bulldogs")
+
+# Downloads the 2021 afl fixtures for each team into the Fixtures_xlsx folder
+download_fixtures <- function(home_path, fixtures_dir, afl_teams) {
+  
+  # Create directory to save files if not already exists
+  if(!dir.exists(fixtures_dir)) {
+    dir.create(fixtures_dir)
+  }
+  
+  ### When downloading files there seems to be a glitch with the date/time column, so I did this manually.
+  # Download files to directory: fixtures_dir 
+  # if (length(list.files(fixtures_dir)) == 0) {
+  #   setwd(paste0(home_path, "/", fixtures_dir))
+  #   for (team in afl_teams) {
+  #     download.file(url = paste0("https://fixturedownload.com/download/afl-2021-", team, "-UTC.xlsx"), 
+  #                   destfile = paste0(team, "_fixtures.xlsx"),
+  #                   method = "wget")
+  #   }
+  # }
+}
+
+download_fixtures(home_path, fixtures_dir, afl_teams)
+
+# Appending each of the .xlsx files to form one .xlsx file with all team fixtures
+merge_fixtures <- function(home_path, fixtures_name, fixtures_dir) {
+  if (!file.exists(fixtures_name)) {
+    setwd(paste0(home_path, "/", fixtures_dir))
+    files <- list.files()
+    fixtures <- list()
+    for (i in 1:length(files)) {
+      fixtures[[i]] <- read_excel(files[i], range=cell_cols("A:E")) %>% 
+        mutate(across("Date", ~if_else(. < as.POSIXct("2021-04-04 03:00:00", tz="UTC"),
+                                       . + hours(11),
+                                       . + hours(10))),
+               across("Date", ~format(., glue("%Y-%m-%d %I:%M")))) %>% 
+        separate("Date", c("Date", "Kick-Off Time"), " ") %>% 
+        mutate(across("Kick-Off Time", ~str_replace(., "^0", "")))
+    }
+    all_fixtures <<- reshape::merge_all(fixtures) %>% as_tibble()
+    setwd(home_path)
+    write_xlsx(all_fixtures, fixtures_name)
+  } else {
+    all_fixtures <<- read_excel(fixtures_name) # <<- means global variable
+  }
+}
+
+merge_fixtures(home_path, fixtures_name, fixtures_dir)
+
+# all_fixtures
+```
+
+
+<!-- ### AFL Ladder -->
+
+```{r Ladder}
+# Gathering and cleaning data on the AFL Ladder
+
+# Using google chrome SelectorGadget to get the table ID
+afl_ladder <- read_html("https://afltables.com/afl/seas/2021.html") %>% 
+  html_element(".sortable") %>% 
+  html_table()
+
+# How to find the class name:
+# afl_ladder %>% 
+#   html_elements("table") %>% 
+#   tail()
+# Here it is the `2nd` last table
+
+# Tidying the AFL Ladder
+afl_ladder_tidy <- afl_ladder %>% 
+  janitor::row_to_names(1) %>%
+  slice(-19) %>% 
+  rename(Position = `#`) %>% 
+  mutate(across(c("W", "D", "L"), ~if_else(.=="", "0", .)),
+         across(c("GF-BF", "GA-BA"), ~str_trunc(., 6, "right", "")),
+         across(c("Position", "P", "W", "D", "L", "For", "Agn", "Pts"), ~as.integer(.)),
+         across(c("GF-BF", "GA-BA", "%"), ~as.numeric(.)))
+
+# afl_ladder_tidy
+```
+
+<!-- ### Historical Results -->
+
+```{r Historical Results}
+# Loading/cleaning Historical AFL results
+hist_results <- read_excel("afl_historical_results.xlsx", 
+                           sheet = "Data", 
+                           range = "A2:L2338")
+
+#mv_checker(hist_results)
+
+hist_results_tidy <- hist_results %>% 
+  rename("Kick-Off Time" = "Kick Off (local)") %>% 
+  mutate(across("Date", ~as.Date(.)),
+         across("Kick-Off Time", ~str_replace(format(., glue("%I:%M")), "^0", "")),
+         across("Play Off Game?", ~replace_na(., "N")))
+
+# hist_results_tidy
+```
+
+<!-- ### Player Statistics -->
+
+<!-- What do the abbreviations mean? -->
+
+<!-- -   TM - Team -->
+<!-- -   GM - Games Played -->
+<!-- -   KI - Kicks -->
+<!-- -   MK - Marks -->
+<!-- -   HB - Handballs -->
+<!-- -   DI - Disposals -->
+<!-- -   GL - Goals -->
+<!-- -   BH - Behinds -->
+<!-- -   HO - Hit Outs -->
+<!-- -   TK - Tackles -->
+<!-- -   RB - Rebound 50s -->
+<!-- -   IF - Inside 50s -->
+<!-- -   CL - Clearances -->
+<!-- -   CG - Clangers -->
+<!-- -   FF - Free Kicks For -->
+<!-- -   FA - Free Kicks Against -->
+<!-- -   BR - Brownlow Votes -->
+<!-- -   CP - Contested Possessions -->
+<!-- -   UP - Uncontested Possessions -->
+<!-- -   CM - Contested Marks -->
+<!-- -   MI - Marks Inside 50 -->
+<!-- -   1% - One Percenters -->
+<!-- -   BO - Bounces -->
+<!-- -   GA - Goal Assists -->
+
+```{r 2021 Player Statistics}
+# AFL Player Statistics Data
+
+# The link provided below is all the player statistics for rounds 1-5 2021.
+player_stats <- read_html("https://afltables.com/afl/stats/2021a.html") %>% 
+  html_element("table") %>% 
+  html_table()
+
+# All character cols have no missing values, great! We'll replace other cols with 0 since there all numeric
+#mv_checker(player_stats)
+
+# Fixing missing values
+player_stats <- player_stats %>% 
+  mutate(across(everything(), ~replace_na(., 0)))
+
+# Creating a mapper from team abbreviation to full name
+team_mapper <- list("WB" = "Western Bulldogs",
+                    "HW" = "Hawthorn",
+                    "ME" = "Melbourne",
+                    "ES" = "Essendon",
+                    "PA" = "Port Adelaide",
+                    "CA" = "Carlton",
+                    "GE" = "Geelong",
+                    "AD" = "Adelaide",
+                    "NM" = "North Melbourne",
+                    "GW" = "Greater Western Sydney",
+                    "CW" = "Collingwood",
+                    "GC" = "Gold Coast",
+                    "SK" = "St Kilda",
+                    "RI" = "Richmond",
+                    "BL" = "Brisbane",
+                    "WC" = "West Coast",
+                    "SY" = "Sydney",
+                    "FR" = "Fremantle")
+
+# Change team name from abbreviation to full name
+change_team_name <- function(df, col, team_mapper) {
+  for (i in seq_along(1:nrow(df))) {
+    for (team in names(team_mapper)) {
+      if (df[i, col] == team) {
+        df[i, col] <- team_mapper[[team]]
+      }
+    }
+  }
+  return(df)
+}
+
+player_stats <- change_team_name(player_stats, "TM", team_mapper)
+
+# Change players name from: "lname, fname" to "fname lname"
+q <- player_stats
+change_player_name <- function(df, col) {
+  df[col] <- df %>% 
+    pull({{ col }}) %>% 
+    str_split(", ") %>% 
+    map_chr(~paste(.[2], .[1]))
+  return(df)
+}
+
+player_stats <- change_player_name(player_stats, "Player")
+
+# player_stats
+```
+
+# Exploratory Data Analysis
+
+### Leading Goal Scorers
+
+```{r Top 10 leading scorers}
+leading_goal_scorers <- player_stats %>% 
+  select(Player, TM, GM, GL) %>% 
+  arrange(desc(GL)) %>%
+  slice(1:10) %>% 
+  mutate(`GL / GM` = round(GL / GM, 2),
+         across(Player, ~fct_reorder(., desc(GL))))
+
+team_fill <- c("Western Bulldogs" = "#0373fc",
+               "Hawthorn" = "#ffb303",
+               "Melbourne" = "#10114a",
+               "Essendon" = "#000000",
+               "Port Adelaide" = "#03fcf4",
+               "Carlton" = "#021716",
+               "Geelong" = "#001645",
+               "Adelaide" = "#ff2014",
+               "North Melbourne" = "#2370cf",
+               "Greater Western Sydney" = "#ff9900", 
+               "Collingwood" = "#000000",
+               "Gold Coast" = "#ff2600",
+               "St Kilda" = "#000000",
+               "Richmond" = "#fff200",
+               "Brisbane" = "#701f03",
+               "West Coast" = "#0c2ef0",
+               "Sydney" = "#ff1900",
+               "Fremantle" = "#6702ba")
+
+top_10_scorers <- leading_goal_scorers %>% 
+  ggplot() +
+  geom_col(aes(Player, GL, fill=TM)) +
+  labs(x = "Player Name",
+       y = "Goals Scored",
+       title = "Top 10 Leading Goal Scorers") +
+  theme(axis.text.x = element_text(angle = 45, hjust=1),
+        plot.title = element_text(hjust = 0.5)) +
+  scale_fill_manual(values = team_fill, name = "Team Colors")
+
+ggplotly(top_10_scorers)
+```
+
+### Leading Goal Assists
+
+```{r Top 10 leaders most assists}
+leading_most_goal_assists <- player_stats %>% 
+  select(Player, TM, GM, GA) %>% 
+  arrange(desc(GA)) %>%
+  slice(1:10) %>% 
+  mutate(`GA / GM` = round(GA / GM, 2),
+         across(Player, ~fct_reorder(., desc(GA))))
+
+top_10_goal_assists <- leading_most_goal_assists %>% 
+  ggplot() +
+  geom_col(aes(Player, GA, fill=TM)) +
+  labs(x = "Player Name",
+       y = "Goals Assists",
+       title = "Top 10 Leaders With Most Assists") +
+  theme(axis.text.x = element_text(angle = 45, hjust=1),
+        plot.title = element_text(hjust = 0.5)) +
+  scale_fill_manual(values = team_fill, name = "Team Colors")
+
+ggplotly(top_10_goal_assists)
+```
+
+
+### Where are the Most Games Played at in 2021?
+
+```{r}
+most_popular_stadiums <- all_fixtures %>% 
+  group_by(Location) %>% 
+  count(sort=TRUE, name="Matches Played") %>% 
+  ungroup() %>% 
+  mutate(across(Location, ~fct_reorder(., desc(`Matches Played`))),
+         State = c("VIC", "VIC", "SA", "WA", "QLD", "NSW", "QLD", "VIC",
+                   "NSW", "TAS", "TAS", "ACT", "VIC", "QLD", "NT", "NT")) %>% 
+  ggplot() +
+  geom_col(aes(x=Location, y=`Matches Played`, fill=State)) +
+  labs(title = "Most Popular Stadiums",
+       x = "Stadium") +
+  theme(axis.text.x = element_text(angle = 45, hjust=1),
+        plot.title = element_text(hjust = 0.5))
+
+ggplotly(most_popular_stadiums)
+```
+
+### Fixtures
+
+Please note that from round 10 onwards the `Date` and `Kick-Off Time` are TBD as of writing. 
+
+```{r}
+shinyApp(
+
+  ui = fluidPage(
+    # Let step=0.5 to increment/decrement by 1, there seems to be some bug
+    numericInput("roundNumber", "Round Number:", value=1, min=1, max=23, step=0.5),
+    
+    # List Fixtures
+    tableOutput("2021FixtureInfo")
+  ),
+
+  server = function(input, output) {
+    
+    # Function allowing fixtures to be filtered by round
+    all_fixtures_filtered <- function(df, round=NULL) {
+      if (is.null(round)) {
+          return(df)
+      } else if (!is.null(round)) {
+          df_filtered <- df %>% 
+              filter(`Round Number` == round) %>% 
+              select(-`Round Number`)
+          return(df_filtered)
+      }
+    }
+    
+    # Update data base on changing round
+    output$`2021FixtureInfo` <- renderTable({
+        all_fixtures_filtered(all_fixtures, input$roundNumber)   
+    })
+  },
+
+  options = list(height = 500)
+)
+```
+
+### AFL Ladder
+
+```{r}
+afl_ladder_tidy %>% 
+  datatable(rownames=FALSE)
+```
+
+
